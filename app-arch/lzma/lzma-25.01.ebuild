@@ -12,7 +12,7 @@ SRC_URI="https://downloads.sourceforge.net/sevenzip/${MY_P}.7z -> ${P}.7z"
 
 LICENSE="public-domain"
 SLOT="0"
-KEYWORDS="amd64 arm64"
+KEYWORDS="~amd64 ~arm64"
 IUSE="doc"
 
 BDEPEND="$(unpacker_src_uri_depends)"
