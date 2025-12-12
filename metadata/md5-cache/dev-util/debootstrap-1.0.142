@@ -1,0 +1,10 @@
+DEFINED_PHASES=compile install postinst unpack
+DESCRIPTION=Debian/Ubuntu bootstrap scripts
+EAPI=8
+HOMEPAGE=https://packages.qa.debian.org/d/debootstrap.html
+KEYWORDS=~amd64
+LICENSE=MIT
+RDEPEND=app-arch/dpkg net-misc/wget sys-devel/binutils
+SLOT=0
+SRC_URI=https://salsa.debian.org/installer-team/debootstrap/-/archive/1.0.142/debootstrap-1.0.142.tar.bz2
+_md5_=696b5822497ea119293d2bda21967377
