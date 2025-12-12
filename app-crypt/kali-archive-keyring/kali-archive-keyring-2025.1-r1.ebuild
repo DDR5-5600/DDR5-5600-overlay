@@ -16,6 +16,6 @@ src_compile() {
 }
 
 src_install() {
-	insinto /usr/share/keyrings/
+	insinto /usr/share/openpgp-keys/
 	doins kali-archive-keyring.gpg
 }
