@@ -1,4 +1,4 @@
-# Copyright 1999-2023 Gentoo Authors
+# Copyright 1999-2025 Gentoo Authors
 # Distributed under the terms of the GNU General Public License v2
 
 EAPI=8
@@ -21,11 +21,11 @@ IUSE="brain video_cards_nvidia"
 RESTRICT=test
 
 DEPEND="app-arch/lzma
-	app-arch/unrar
-	sys-libs/zlib[minizip]
+	>=app-arch/unrar-7
+	virtual/minizip:=
 	brain? ( dev-libs/xxhash )
 	video_cards_nvidia? (
-		>x11-drivers/nvidia-drivers-440.64
+		x11-drivers/nvidia-drivers
 		|| (
 			dev-util/nvidia-cuda-toolkit
 			virtual/opencl
@@ -78,7 +78,7 @@ src_compile() {
 		ENABLE_BRAIN=$(usex brain 1 0) \
 		USE_SYSTEM_LZMA=0 \
 		USE_SYSTEM_OPENCL=1 \
-		USE_SYSTEM_UNRAR=0 \
+		USE_SYSTEM_UNRAR=1 \
 		USE_SYSTEM_ZLIB=1 \
 		USE_SYSTEM_XXHASH=1 \
 		VERSION_PURE="${PV}"

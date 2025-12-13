@@ -9,5 +9,5 @@ KEYWORDS=~amd64 ~arm64
 LICENSE=public-domain
 SLOT=0
 SRC_URI=https://downloads.sourceforge.net/sevenzip/lzma2501.7z -> lzma-25.01.7z
-_eclasses_=toolchain-funcs	a0b29008c671a362b505f96fa80ce9c0	multiprocessing	1e32df7deee68372153dca65f4a7c21f	unpacker	3b4ee72d1e2e0374fd8cd3eddfa00627
+_eclasses_=toolchain-funcs	98d9f464d912ae6b7316fb8a3721f5db	multiprocessing	1e32df7deee68372153dca65f4a7c21f	unpacker	3b4ee72d1e2e0374fd8cd3eddfa00627
 _md5_=997b525225c7e662806b1ba67cb18c3a
