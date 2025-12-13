@@ -5,8 +5,8 @@
 
 EAPI=8
 
-PYTHON_COMPAT=( python3_{11..13} )
-inherit check-reqs edo toolchain-funcs
+PYTHON_COMPAT=( python3_{10..14} )
+inherit check-reqs toolchain-funcs
 inherit python-r1
 
 DRIVER_PV="580.95.05"
@@ -31,7 +31,7 @@ SLOT="0/${PV}" # UNSLOTTED
 # SLOT="${PV}" # SLOTTED
 
 KEYWORDS="-* ~amd64 ~arm64 ~amd64-linux ~arm64-linux"
-IUSE="clang debugger examples nsight profiler rdma sanitizer"
+IUSE="debugger examples profiler rdma sanitizer"
 RESTRICT="bindist mirror strip test"
 
 REQUIRED_USE="${PYTHON_REQUIRED_USE}"
@@ -39,10 +39,8 @@ REQUIRED_USE="${PYTHON_REQUIRED_USE}"
 # since CUDA 11, the bundled toolkit driver (== ${DRIVER_PV}) and the
 # actual required minimum driver version are different.
 RDEPEND="
-	!clang? (
+	|| (
 		<sys-devel/gcc-$(( GCC_MAX_VER + 1 ))_pre[cxx]
-	)
-	clang? (
 		<llvm-core/clang-$(( CLANG_MAX_VER + 1 ))_pre
 	)
 	sys-process/numactl
@@ -53,13 +51,7 @@ RDEPEND="
 		media-libs/freeglut
 		media-libs/glu
 	)
-	nsight? (
-		dev-util/nsight-compute
-		dev-util/nsight-systems
-	)
-	rdma? (
-		sys-cluster/rdma-core
-	)
+	rdma? ( sys-cluster/rdma-core )
 "
 BDEPEND="
 	$(python_gen_any_dep '
@@ -71,22 +63,35 @@ BDEPEND="
 CUDA_PATH="/opt/cuda"
 QA_PREBUILT="${CUDA_PATH#/}/*"
 
+#PATCHES=(
+#	"${FILESDIR}/nvidia-cuda-toolkit-glibc-2.41-r1.patch"
+#)
+
 python_check_deps() {
 	python_has_version "dev-python/defusedxml[${PYTHON_USEDEP}]"
 }
 
 cuda-toolkit_check_reqs() {
 	if use amd64; then
-		export CHECKREQS_DISK_BUILD="7228M"
+		export CHECKREQS_DISK_BUILD="6645M"
 	elif use arm64; then
-		export CHECKREQS_DISK_BUILD="6998M"
+		export CHECKREQS_DISK_BUILD="6412M"
 	fi
 
 	"check-reqs_pkg_${EBUILD_PHASE}"
 }
 
 cuda_verify() {
-	# only works with unpacked sources
+	if has_version "sys-apps/grep[pcre]"; then
+		local DRIVER_PV_info
+		DRIVER_PV_info="$(bash "${DISTDIR}/${A}" --info | grep -oP "cuda_${PV}.*run" | cut -d '_' -f 3)"
+
+		if [[ "${DRIVER_PV}" != "${DRIVER_PV_info}" ]]; then
+			die "check DRIVER_PV is ${DRIVER_PV} and should be ${DRIVER_PV_info}"
+		fi
+	fi
+
+	# rest only works in with unpacked sources
 	[[ "${EBUILD_PHASE}" != prepare ]] && return
 
 	# run self checks
@@ -113,10 +118,6 @@ pkg_pretend() {
 
 pkg_setup() {
 	cuda-toolkit_check_reqs
-
-	if [[ "${MERGE_TYPE}" == binary ]]; then
-		return
-	fi
 
 	# we need python for manifest parsing and to determine the supported python versions for cuda-gdb
 	python_setup
@@ -147,19 +148,7 @@ src_unpack() {
 		"builds/nvidia_fs"
 	)
 
-	edob -m "Extracting ${A}" \
-		bash "${DISTDIR}/${A}" --tar xf -X <(printf "%s\n" "${exclude[@]}")
-}
-
-src_prepare() {
-	# pushd "builds/cuda_nvcc/targets/${narch}-linux" >/dev/null || die
-	# eapply -p5 "${FILESDIR}/nvidia-cuda-toolkit-glibc-2.41-r1.patch"
-	# popd >/dev/null || die
-	# pushd "builds/cuda_nvcc/targets/${narch}-linux" >/dev/null || die
-	# eapply -p5 "${FILESDIR}/nvidia-cuda-toolkit-glibc-2.42.patch"
-	# popd >/dev/null || die
-
-	default
+	bash "${DISTDIR}/${A}" --tar xf -X <(printf "%s\n" "${exclude[@]}") || die "failed to extract ${A}"
 }
 
 src_configure() {
@@ -228,7 +217,7 @@ src_install() {
 		[[ $# -eq 0 ]] && return
 
 		dodir "${CUDA_PATH}/pkgconfig"
-		cat > "${ED}${CUDA_PATH}/pkgconfig/${1}.pc" <<-EOF || die "dopcfile"
+		cat > "${ED}${CUDA_PATH}/pkgconfig/${1}-${2}.pc" <<-EOF || die "dopcfile"
 			cudaroot=${EPREFIX}${CUDA_PATH}
 			libdir=\${cudaroot}/targets/${narch}-linux/lib${4}
 			includedir=\${cudaroot}/targets/${narch}-linux/include
@@ -290,8 +279,8 @@ src_install() {
 	fi
 
 	# Add include and lib symlinks
-	dosym -r "${CUDA_PATH}/targets/${narch}-linux/include" "${CUDA_PATH}/include"
-	dosym -r "${CUDA_PATH}/targets/${narch}-linux/lib" "${CUDA_PATH}/$(get_libdir)"
+	dosym "targets/${narch}-linux/include" "${CUDA_PATH}/include"
+	dosym "targets/${narch}-linux/lib" "${CUDA_PATH}/lib64"
 
 	find "${ED}/${CUDA_PATH}" -empty -delete || die
 
@@ -304,7 +293,7 @@ src_install() {
 	newenvd - "99cuda${revord}" <<-EOF
 		PATH=${EPREFIX}${CUDA_PATH}/bin${pathextradirs}
 		PKG_CONFIG_PATH=${EPREFIX}${CUDA_PATH}/pkgconfig
-		LDPATH=${EPREFIX}${CUDA_PATH}/$(get_libdir):${EPREFIX}${CUDA_PATH}/nvvm/lib64${ldpathextradirs}
+		LDPATH=${EPREFIX}${CUDA_PATH}/lib64:${EPREFIX}${CUDA_PATH}/nvvm/lib64${ldpathextradirs}
 	EOF
 
 	# CUDA prepackages libraries, don't revdep-build on them
@@ -332,19 +321,15 @@ src_install() {
 
 	# skip til cudnn has been changed #950207
 	# if [[ "${SLOT}" != "${PV}" ]]; then
-	# 	dosym -r "${CUDA_PATH}" "${CUDA_PATH%"-${PV}"}"
+	# 	dosym "${CUDA_PATH}" "${CUDA_PATH%"-${PV}"}"
 	# fi
 
 	fowners -R root:root "${CUDA_PATH}"
 }
 
 pkg_postinst_check() {
-	# Due to requiring specific compiler versions here, we check more then we have to, for the sake of clarity.
-	# tc-getCC defaults to gcc, so clang-major-version is checked using gcc and fails on gcc-profiles. # 959420
-	# We therefore force gcc and clang for the check.
-
-	if tc-is-gcc || ! use clang; then
-		if ver_test "$(CC=gcc gcc-major-version)" -gt "${GCC_MAX_VER}"; then
+	if tc-is-gcc &&
+		ver_test "$(gcc-major-version)" -gt "${GCC_MAX_VER}"; then
 			ewarn
 			ewarn "gcc > ${GCC_MAX_VER} will not work with CUDA"
 			ewarn
@@ -353,11 +338,10 @@ pkg_postinst_check() {
 			ewarn "	NVCCFLAGS=\"--ccbin=$(eval echo "${EPREFIX}/usr/*-linux-gnu/gcc-bin/${GCC_MAX_VER}")\""
 			ewarn "	NVCC_CCBIN=$(eval echo "${EPREFIX}/usr/*-linux-gnu/gcc-bin/${GCC_MAX_VER}")"
 			ewarn
-		fi
 	fi
 
-	if tc-is-clang || use clang; then
-		if ver_test "$(CC=clang clang-major-version)" -gt "${CLANG_MAX_VER}"; then
+	if tc-is-clang &&
+		ver_test "$(clang-major-version)" -gt "${CLANG_MAX_VER}"; then
 			ewarn
 			ewarn "clang > ${CLANG_MAX_VER} will not work with CUDA"
 			ewarn
@@ -366,7 +350,6 @@ pkg_postinst_check() {
 			ewarn "	NVCCFLAGS=\"--ccbin=$(eval echo "${EPREFIX}/usr/lib/llvm/*/bin${CLANG_MAX_VER}")\""
 			ewarn "	NVCC_CCBIN=$(eval echo "${EPREFIX}/usr/lib/llvm/*/bin${CLANG_MAX_VER}")"
 			ewarn
-		fi
 	fi
 }
 
