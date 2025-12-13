@@ -5,8 +5,8 @@
 
 EAPI=8
 
-PYTHON_COMPAT=( python3_{10..14} )
-inherit check-reqs toolchain-funcs
+PYTHON_COMPAT=( python3_{11..13} )
+inherit check-reqs edo toolchain-funcs
 inherit python-r1
 
 DRIVER_PV="580.95.05"
@@ -27,11 +27,11 @@ S="${WORKDIR}"
 
 LICENSE="NVIDIA-CUDA"
 
-SLOT="0/${PV}" # UNSLOTTED
-# SLOT="${PV}" # SLOTTED
+#SLOT="0/${PV}" # UNSLOTTED
+SLOT="${PV}" # SLOTTED
 
 KEYWORDS="-* ~amd64 ~arm64 ~amd64-linux ~arm64-linux"
-IUSE="debugger examples profiler rdma sanitizer"
+IUSE="clang debugger examples nsight profiler rdma sanitizer"
 RESTRICT="bindist mirror strip test"
 
 REQUIRED_USE="${PYTHON_REQUIRED_USE}"
@@ -39,8 +39,10 @@ REQUIRED_USE="${PYTHON_REQUIRED_USE}"
 # since CUDA 11, the bundled toolkit driver (== ${DRIVER_PV}) and the
 # actual required minimum driver version are different.
 RDEPEND="
-	|| (
+	!clang? (
 		<sys-devel/gcc-$(( GCC_MAX_VER + 1 ))_pre[cxx]
+	)
+	clang? (
 		<llvm-core/clang-$(( CLANG_MAX_VER + 1 ))_pre
 	)
 	sys-process/numactl
@@ -51,7 +53,13 @@ RDEPEND="
 		media-libs/freeglut
 		media-libs/glu
 	)
-	rdma? ( sys-cluster/rdma-core )
+	nsight? (
+		dev-util/nsight-compute
+		dev-util/nsight-systems
+	)
+	rdma? (
+		sys-cluster/rdma-core
+	)
 "
 BDEPEND="
 	$(python_gen_any_dep '
@@ -59,13 +67,10 @@ BDEPEND="
 	')
 "
 
-# CUDA_PATH="/opt/cuda-${PV}" #950207
-CUDA_PATH="/opt/cuda"
+#CUDA_PATH="/opt/cuda-${PV}" #950207
+CUDA_PATH="/opt/cuda-${PV}"
+#CUDA_PATH="/opt/cuda"
 QA_PREBUILT="${CUDA_PATH#/}/*"
-
-#PATCHES=(
-#	"${FILESDIR}/nvidia-cuda-toolkit-glibc-2.41-r1.patch"
-#)
 
 python_check_deps() {
 	python_has_version "dev-python/defusedxml[${PYTHON_USEDEP}]"
@@ -73,25 +78,16 @@ python_check_deps() {
 
 cuda-toolkit_check_reqs() {
 	if use amd64; then
-		export CHECKREQS_DISK_BUILD="6645M"
+		export CHECKREQS_DISK_BUILD="7228M"
 	elif use arm64; then
-		export CHECKREQS_DISK_BUILD="6412M"
+		export CHECKREQS_DISK_BUILD="6998M"
 	fi
 
 	"check-reqs_pkg_${EBUILD_PHASE}"
 }
 
 cuda_verify() {
-	if has_version "sys-apps/grep[pcre]"; then
-		local DRIVER_PV_info
-		DRIVER_PV_info="$(bash "${DISTDIR}/${A}" --info | grep -oP "cuda_${PV}.*run" | cut -d '_' -f 3)"
-
-		if [[ "${DRIVER_PV}" != "${DRIVER_PV_info}" ]]; then
-			die "check DRIVER_PV is ${DRIVER_PV} and should be ${DRIVER_PV_info}"
-		fi
-	fi
-
-	# rest only works in with unpacked sources
+	# only works with unpacked sources
 	[[ "${EBUILD_PHASE}" != prepare ]] && return
 
 	# run self checks
@@ -118,6 +114,10 @@ pkg_pretend() {
 
 pkg_setup() {
 	cuda-toolkit_check_reqs
+
+	if [[ "${MERGE_TYPE}" == binary ]]; then
+		return
+	fi
 
 	# we need python for manifest parsing and to determine the supported python versions for cuda-gdb
 	python_setup
@@ -148,15 +148,18 @@ src_unpack() {
 		"builds/nvidia_fs"
 	)
 
-	bash "${DISTDIR}/${A}" --tar xf -X <(printf "%s\n" "${exclude[@]}") || die "failed to extract ${A}"
+	edob -m "Extracting ${A}" \
+		bash "${DISTDIR}/${A}" --tar xf -X <(printf "%s\n" "${exclude[@]}")
 }
 
-src_configure() {
-	:
-}
+src_prepare() {
 
-src_compile() {
-	:
+	einfo $PWD
+
+	# CUDA 13 suppors glibc 2.41, this patch adds compatibility with  glibc 2.42
+	eapply -p1 "${FILESDIR}/nvidia-cuda-toolkit-glibc-2.42.patch"
+
+	default
 }
 
 src_install() {
@@ -217,7 +220,7 @@ src_install() {
 		[[ $# -eq 0 ]] && return
 
 		dodir "${CUDA_PATH}/pkgconfig"
-		cat > "${ED}${CUDA_PATH}/pkgconfig/${1}-${2}.pc" <<-EOF || die "dopcfile"
+		cat > "${ED}${CUDA_PATH}/pkgconfig/${1}.pc" <<-EOF || die "dopcfile"
 			cudaroot=${EPREFIX}${CUDA_PATH}
 			libdir=\${cudaroot}/targets/${narch}-linux/lib${4}
 			includedir=\${cudaroot}/targets/${narch}-linux/include
@@ -249,7 +252,7 @@ src_install() {
 	chmod -x "${fix_executable_bit[@]}" || die "failed chmod"
 	popd >/dev/null || die
 
-	ebegin "parsing manifest" "${S}/manifests/cuda_"*.xml # {{{
+	ebegin "Parsing manifest" "${S}/manifests/cuda_"*.xml # {{{
 
 	"${EPYTHON}" "${FILESDIR}/parse_manifest.py" "${S}/manifests/cuda_"*".xml" &> "${T}/install.sh" \
 		|| die "failed to parse manifest"
@@ -257,6 +260,65 @@ src_install() {
 	source "${T}/install.sh" || die "failed  to source install script"
 
 	eend $? # }}}
+
+	# At this point ${ED}/${CUDA_PATH} should *not* be empty 
+	find "${ED}/${CUDA_PATH}" -empty -delete || die "empty CUDA installation dir"
+
+	# Remove directories created by manifest parsing before creating compatibility symlinks
+	# But first, merge any content that was already placed there
+	if [[ -d "${ED}/${CUDA_PATH}/include" && ! -L "${ED}/${CUDA_PATH}/include" ]]; then
+		einfo "Merging existing include content before creating symlink"
+		
+		# Ensure target directory exists
+		mkdir -p "${ED}/${CUDA_PATH}/targets/${narch}-linux/include" || die "failed to create target include directory"
+		
+		# Move any existing content from include/ to targets/.../include/
+		if [[ -n "$(ls -A "${ED}/${CUDA_PATH}/include" 2>/dev/null)" ]]; then
+			einfo "Moving existing include content to target directory"
+			cp -a "${ED}/${CUDA_PATH}/include"/* "${ED}/${CUDA_PATH}/targets/${narch}-linux/include/" || die "failed to merge include content"
+		fi
+		
+		# Now remove the directory
+		rm -rf "${ED}/${CUDA_PATH}/include" || die "failed to remove include directory"
+	fi
+
+	if [[ -d "${ED}/${CUDA_PATH}/$(get_libdir)" && ! -L "${ED}/${CUDA_PATH}/$(get_libdir)" ]]; then
+		einfo "Merging existing lib content before creating symlink"
+		
+		# Ensure target directory exists  
+		mkdir -p "${ED}/${CUDA_PATH}/targets/${narch}-linux/lib" || die "failed to create target lib directory"
+		
+		# Move any existing content from lib/ to targets/.../lib/
+		if [[ -n "$(ls -A "${ED}/${CUDA_PATH}/$(get_libdir)" 2>/dev/null)" ]]; then
+			einfo "Moving existing lib content to target directory"
+			cp -a "${ED}/${CUDA_PATH}/$(get_libdir)"/* "${ED}/${CUDA_PATH}/targets/${narch}-linux/lib/" || die "failed to merge lib content"
+		fi
+		
+		# Now remove the directory
+		rm -rf "${ED}/${CUDA_PATH}/$(get_libdir)" || die "failed to remove lib directory"
+	fi
+
+	# Create symlinks for backward compatibility  
+	dosym "targets/${narch}-linux/include" "${CUDA_PATH#/}/include"
+	dosym "targets/${narch}-linux/lib" "${CUDA_PATH#/}/$(get_libdir)"
+
+	# Since /include is now a symlink to targets/.../include, we need to create
+	# component symlinks inside the actual target directory for CCCL components
+	for component in cub thrust libcudacxx; do
+		local direct_path="${ED}/${CUDA_PATH}/targets/${narch}-linux/include/${component}"
+		local cccl_path="${ED}/${CUDA_PATH}/targets/${narch}-linux/include/cccl/${component}"
+		
+		# Only create symlink if component exists in CCCL but not directly in include
+		if [[ ! -e "${direct_path}" && -d "${cccl_path}" ]]; then
+			einfo "Creating ${component} symlink in target include directory (CCCL location)"
+			# Create relative symlink from targets/.../include/cub to cccl/cub  
+			dosym "cccl/${component}" "${CUDA_PATH#/}/targets/${narch}-linux/include/${component}"
+		elif [[ -d "${direct_path}" ]]; then
+			einfo "Component ${component} already exists in direct location, no symlink needed"
+		else
+			einfo "Component ${component} not found in either location, skipping"
+		fi
+	done
 
 	if use debugger; then
 		if [[ -d "${ED}/${CUDA_PATH}/extras/Debugger/lib64" ]]; then
@@ -278,12 +340,6 @@ src_install() {
 		rm "${ED}/${CUDA_PATH}/targets/${narch}-linux/lib/libcufile_rdma"* || die "failed to remove rdma files"
 	fi
 
-	# Add include and lib symlinks
-	dosym "targets/${narch}-linux/include" "${CUDA_PATH}/include"
-	dosym "targets/${narch}-linux/lib" "${CUDA_PATH}/lib64"
-
-	find "${ED}/${CUDA_PATH}" -empty -delete || die
-
 	local ldpathextradirs pathextradirs
 
 	use debugger && ldpathextradirs+=":${EPREFIX}${CUDA_PATH}/extras/Debugger/lib64"
@@ -293,7 +349,7 @@ src_install() {
 	newenvd - "99cuda${revord}" <<-EOF
 		PATH=${EPREFIX}${CUDA_PATH}/bin${pathextradirs}
 		PKG_CONFIG_PATH=${EPREFIX}${CUDA_PATH}/pkgconfig
-		LDPATH=${EPREFIX}${CUDA_PATH}/lib64:${EPREFIX}${CUDA_PATH}/nvvm/lib64${ldpathextradirs}
+		LDPATH=${EPREFIX}${CUDA_PATH}/$(get_libdir):${EPREFIX}${CUDA_PATH}/nvvm/lib64${ldpathextradirs}
 	EOF
 
 	# CUDA prepackages libraries, don't revdep-build on them
@@ -311,7 +367,13 @@ src_install() {
 	# TODO drop and replace with runtime detection similar to what python does {{{
 	# ATTENTION: change requires revbump, see link below for supported GCC # versions
 	# https://docs.nvidia.com/cuda/cuda-installation-guide-linux/index.html#system-requirements
-	local cuda_supported_gcc=( 8.5 9.5 10 11 12 13 "${GCC_MAX_VER}" )
+	
+	# Generate GCC version list dynamically from 10 to GCC_MAX_VER
+	# (keeping the legacy versions 8.5 and 9.5 for compatibility)
+	local cuda_supported_gcc=( 8.5 9.5 )
+	for ((ver=10; ver<=GCC_MAX_VER; ver++)); do
+		cuda_supported_gcc+=( "${ver}" )
+	done
 
 	sed \
 		-e "s:CUDA_SUPPORTED_GCC:${cuda_supported_gcc[*]}:g" \
@@ -321,15 +383,19 @@ src_install() {
 
 	# skip til cudnn has been changed #950207
 	# if [[ "${SLOT}" != "${PV}" ]]; then
-	# 	dosym "${CUDA_PATH}" "${CUDA_PATH%"-${PV}"}"
+	# 	dosym -r "${CUDA_PATH}" "${CUDA_PATH%"-${PV}"}"
 	# fi
 
 	fowners -R root:root "${CUDA_PATH}"
 }
 
 pkg_postinst_check() {
-	if tc-is-gcc &&
-		ver_test "$(gcc-major-version)" -gt "${GCC_MAX_VER}"; then
+	# Due to requiring specific compiler versions here, we check more then we have to, for the sake of clarity.
+	# tc-getCC defaults to gcc, so clang-major-version is checked using gcc and fails on gcc-profiles. # 959420
+	# We therefore force gcc and clang for the check.
+
+	if tc-is-gcc || ! use clang; then
+		if ver_test "$(CC=gcc gcc-major-version)" -gt "${GCC_MAX_VER}"; then
 			ewarn
 			ewarn "gcc > ${GCC_MAX_VER} will not work with CUDA"
 			ewarn
@@ -338,10 +404,11 @@ pkg_postinst_check() {
 			ewarn "	NVCCFLAGS=\"--ccbin=$(eval echo "${EPREFIX}/usr/*-linux-gnu/gcc-bin/${GCC_MAX_VER}")\""
 			ewarn "	NVCC_CCBIN=$(eval echo "${EPREFIX}/usr/*-linux-gnu/gcc-bin/${GCC_MAX_VER}")"
 			ewarn
+		fi
 	fi
 
-	if tc-is-clang &&
-		ver_test "$(clang-major-version)" -gt "${CLANG_MAX_VER}"; then
+	if tc-is-clang || use clang; then
+		if ver_test "$(CC=clang clang-major-version)" -gt "${CLANG_MAX_VER}"; then
 			ewarn
 			ewarn "clang > ${CLANG_MAX_VER} will not work with CUDA"
 			ewarn
@@ -350,6 +417,7 @@ pkg_postinst_check() {
 			ewarn "	NVCCFLAGS=\"--ccbin=$(eval echo "${EPREFIX}/usr/lib/llvm/*/bin${CLANG_MAX_VER}")\""
 			ewarn "	NVCC_CCBIN=$(eval echo "${EPREFIX}/usr/lib/llvm/*/bin${CLANG_MAX_VER}")"
 			ewarn
+		fi
 	fi
 }
 
